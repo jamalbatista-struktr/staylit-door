@@ -1,0 +1,100 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Stay Lit · Door Scanner</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx" crossorigin="anonymous"></script>
+<style>
+  :root{--fire:linear-gradient(90deg,#E11D1D,#FF6A00 55%,#FFC400)}
+  *{box-sizing:border-box}
+  body{margin:0;background:#000;color:#F2EDE6;font-family:-apple-system,Segoe UI,Inter,sans-serif;-webkit-tap-highlight-color:transparent}
+  .head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #1c1c1c}
+  .head b{font-size:14px;letter-spacing:.04em}.head .c{font:700 12px ui-monospace,monospace;color:#FF6A00}
+  .wrap{max-width:520px;margin:0 auto}
+  .gate{padding:40px 22px;text-align:center}
+  .gate h1{font-size:22px;margin:0 0 6px}.gate p{color:#9a938a;font-size:14px;margin:0 0 20px}
+  input{width:100%;padding:14px;border-radius:12px;border:1px solid #2a2a2a;background:#0d0d0d;color:#fff;font-size:16px;text-align:center}
+  button{border:none;border-radius:999px;padding:14px 20px;font-weight:800;font-size:15px;cursor:pointer;background:var(--fire);color:#1a0f06;width:100%;margin-top:14px}
+  #cam{display:none}
+  video{width:100%;display:block;background:#000;aspect-ratio:3/4;object-fit:cover}
+  .reticle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+  .reticle div{width:64%;aspect-ratio:1;border:3px solid rgba(255,106,0,.9);border-radius:18px;box-shadow:0 0 0 2000px rgba(0,0,0,.28)}
+  .stage{position:relative}
+  .counter{padding:10px;text-align:center;font:600 13px ui-monospace,monospace;color:#9a938a;border-bottom:1px solid #1c1c1c}
+  .counter b{color:#FFC400}
+  .verdict{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;z-index:9}
+  .verdict.show{display:flex}
+  .v-ok{background:radial-gradient(120% 120% at 50% 30%,#0e3a1a,#000)}
+  .v-bad{background:radial-gradient(120% 120% at 50% 30%,#3a0e12,#000)}
+  .mark{width:110px;height:110px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:62px;margin-bottom:18px}
+  .v-ok .mark{background:#16a34a}.v-bad .mark{background:#dc2626}
+  .verdict h2{font-size:30px;margin:0 0 8px}
+  .who{font-size:18px;font-weight:700}.sub{color:#cdc6bc;font:400 14px ui-monospace,monospace;margin-top:4px}
+  .err{color:#ff8a8a;font-size:13px;min-height:18px;margin-top:8px}
+</style></head><body>
+<div class="head"><b>STAY LIT · DOOR</b><span class="c" id="evt">SCANNER</span></div>
+<div class="wrap">
+  <div class="gate" id="gate">
+    <h1>Door Scanner</h1><p>Enter the door code to start scanning.</p>
+    <input id="code" type="password" inputmode="numeric" placeholder="Door code" autocomplete="off">
+    <button onclick="start()">Start scanning</button>
+    <div class="err" id="err"></div>
+  </div>
+  <div id="cam">
+    <div class="counter">Checked in: <b id="cnt">0</b></div>
+    <div class="stage"><video id="v" playsinline muted></video><div class="reticle"><div></div></div></div>
+  </div>
+</div>
+<div class="verdict" id="verdict"><div class="mark" id="mark"></div><h2 id="vt"></h2><div class="who" id="who"></div><div class="sub" id="vs"></div><button onclick="next()">Scan next</button></div>
+<script>
+const ANON="sb_publishable_1LItrh36ssH6c6_gKlqCUQ_4BG6FVwp";
+let code="",stream=null,scanning=false,count=0;
+const $=id=>document.getElementById(id);
+function start(){
+  code=$("code").value.trim();
+  if(!code){$("err").textContent="Enter the door code.";return;}
+  navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}})
+    .then(s=>{stream=s;const v=$("v");v.srcObject=s;v.play();$("gate").style.display="none";$("cam").style.display="block";scanning=true;loop();})
+    .catch(e=>{$("err").textContent="Camera blocked: "+e.message;});
+}
+const cv=document.createElement("canvas"),ctx=cv.getContext("2d",{willReadFrequently:true});
+function loop(){
+  if(!scanning)return;
+  const v=$("v");
+  if(v.readyState===v.HAVE_ENOUGH_DATA){
+    cv.width=v.videoWidth;cv.height=v.videoHeight;
+    ctx.drawImage(v,0,0,cv.width,cv.height);
+    const img=ctx.getImageData(0,0,cv.width,cv.height);
+    const r=jsQR(img.data,img.width,img.height);
+    if(r&&r.data){scanning=false;checkIn(r.data);return;}
+  }
+  requestAnimationFrame(loop);
+}
+function tokenFrom(text){try{const u=new URL(text);return u.searchParams.get("ticket")||text;}catch(_){return text;}}
+async function checkIn(qr){
+  const token=tokenFrom(qr);
+  try{
+    const res=await fetch("https://vftfzidbhivhyzyphmjf.supabase.co/functions/v1/check-in?ticket="+encodeURIComponent(token),
+      {method:"POST",headers:{"x-door-secret":code,"apikey":ANON,"Authorization":"Bearer "+ANON}});
+    const d=await res.json();
+    if(res.status===401){return show(false,"WRONG CODE","","Door code rejected");}
+    render(d);
+  }catch(e){show(false,"ERROR","",e.message);}
+}
+function render(d){
+  const s=d.status;
+  if(s==="ok"||(s==="reentry"&&d.inside)){
+    count++;$("cnt").textContent=count;
+    show(true,s==="reentry"?"RE-ENTRY":"VALID",d.guest_name||"Guest",(d.ticket_type||"")+(d.event_name?" · "+d.event_name:""));
+  }else if(s==="reentry"){show(true,"EXIT OK",d.guest_name||"Guest",d.ticket_type||"");}
+  else if(s==="already_used"){show(false,"ALREADY IN",d.guest_name||"Guest","Checked in "+fmt(d.checked_in_at));}
+  else if(s==="not_found"){show(false,"INVALID","","Not a valid ticket");}
+  else if(s==="invalid"){show(false,"INVALID","","Ticket "+(d.ticket_status||"not usable"));}
+  else{show(false,"ERROR","",JSON.stringify(d));}
+}
+function fmt(t){try{return new Date(t).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});}catch(_){return"";}}
+function show(ok,title,who,sub){
+  const vd=$("verdict");vd.className="verdict show "+(ok?"v-ok":"v-bad");
+  $("mark").textContent=ok?"✓":"✕";$("vt").textContent=title;$("who").textContent=who;$("vs").textContent=sub;
+  if(navigator.vibrate)navigator.vibrate(ok?80:[60,40,60]);
+}
+function next(){$("verdict").className="verdict";scanning=true;loop();}
+</script></body></html>
