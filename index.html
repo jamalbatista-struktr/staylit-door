@@ -10143,6 +10143,19 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
   .verdict h2{font-size:30px;margin:0 0 8px}
   .who{font-size:18px;font-weight:700}.sub{color:#cdc6bc;font:400 14px ui-monospace,monospace;margin-top:4px}
   .err{color:#ff8a8a;font-size:13px;min-height:18px;margin-top:8px}
+  #whoPanel{display:none}
+  .whohead{display:flex;align-items:baseline;justify-content:space-between;padding:16px 0 4px}
+  .whohead b{font-size:22px;color:#FFC400}
+  .seg{display:flex;gap:8px;margin:10px 0}
+  .seg .evt{flex:1;text-align:center;padding:11px}
+  .num{font:700 14px ui-monospace,monospace;flex:none}
+  .full{color:#FFC400}
+  .tier{display:flex;justify-content:space-between;padding:16px 2px 6px;font-weight:800;color:#FFC400}
+  .sec{border:1px solid #2a2a2a;border-radius:12px;margin:6px 0;background:#0d0d0d}
+  .sech{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;margin:0;padding:15px 14px;background:none;color:#F2EDE6;border-radius:12px;font-size:15px;text-align:left}
+  .secb{display:none;padding:0 14px 10px}
+  .sec.open .secb{display:block}
+  .tag{font:700 10px ui-monospace,monospace;color:#FF6A00;margin-left:8px}
 </style></head><body>
 <div class="head"><b>STAY LIT · DOOR</b><button class="c" id="evt" onclick="backToGate()">SCANNER</button></div>
 <div class="wrap">
@@ -10155,7 +10168,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
   </div>
   <div id="cam">
     <div class="counter">Checked in: <b id="cnt">0</b></div>
-    <div class="stage"><video id="v" playsinline muted></video><div class="reticle"><div></div></div></div>
+    <div class="stage" id="stage"><video id="v" playsinline muted></video><div class="reticle"><div></div></div></div>
     <div class="pad">
       <button class="ghost" id="cant" onclick="openLookup()">Can't scan? Find by name</button>
       <div id="lookup">
@@ -10164,6 +10177,14 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         <button onclick="search()">Search</button>
         <button class="ghost" onclick="closeLookup()">Back to camera</button>
         <div id="results"></div>
+      </div>
+      <button class="ghost" id="whoBtn" onclick="openWho()">Who's in</button>
+      <div id="whoPanel">
+        <div class="whohead"><b id="whoCount">0 in</b><span class="sub" id="whoUpd"></span></div>
+        <div class="seg"><button class="evt on" id="segAll" type="button" onclick="setWhoMode('all')">Everyone</button><button class="evt" id="segVip" type="button" onclick="setWhoMode('vip')">VIP</button></div>
+        <input id="wq" type="search" placeholder="Search name" autocomplete="off" oninput="renderWho()">
+        <div id="whoList"></div>
+        <button class="ghost" onclick="closeWho()">Back to camera</button>
       </div>
     </div>
   </div>
@@ -10254,7 +10275,7 @@ function backToGate(){
   if($("gate").style.display==="none"){
     scanning=false;
     if(stream)stream.getTracks().forEach(function(t){t.stop();});
-    stream=null;closeLookup();
+    stream=null;closeLookup();closeWho();
     $("cam").style.display="none";$("gate").style.display="block";
     $("evt").textContent="SCANNER";$("go").textContent="Start scanning";
   }
@@ -10336,9 +10357,9 @@ function next(){
 }
 
 // ---- manual lookup ----------------------------------------------------------
-function openLookup(){scanning=false;$("lookup").style.display="block";$("cant").style.display="none";$("q").focus();}
+function openLookup(){scanning=false;$("lookup").style.display="block";$("cant").style.display="none";$("whoBtn").style.display="none";$("q").focus();}
 function closeLookup(){
-  $("lookup").style.display="none";$("cant").style.display="block";
+  $("lookup").style.display="none";$("cant").style.display="block";$("whoBtn").style.display="block";
   $("q").value="";$("results").innerHTML="";
   if(stream&&!scanning){scanning=true;loop();}
 }
@@ -10382,6 +10403,96 @@ async function search(){
       box.appendChild(row);
     });
   }catch(e){note("Search failed: "+e.message);}
+}
+
+// ---- who's in ---------------------------------------------------------------
+// Who is inside for tonight's event, and every VIP section's "2/12" with who
+// from it is in. Read only; refreshes while open. Names are untrusted text, so
+// everything is built with textContent, never innerHTML.
+const WHO_REFRESH_MS=30000;
+let whoData=null,whoMode="all",whoTimer=null;
+const whoOpen={};   // which VIP sections are expanded, kept across refreshes
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e;}
+function openWho(){
+  scanning=false;
+  // Hide the camera so the list sits at the top of a phone screen, not below it.
+  $("stage").style.display="none";
+  $("cant").style.display="none";$("whoBtn").style.display="none";$("whoPanel").style.display="block";
+  loadWho();clearInterval(whoTimer);whoTimer=setInterval(loadWho,WHO_REFRESH_MS);
+}
+function closeWho(){
+  clearInterval(whoTimer);whoTimer=null;
+  $("whoPanel").style.display="none";$("cant").style.display="block";$("whoBtn").style.display="block";
+  $("stage").style.display="";$("wq").value="";
+  if(stream&&!scanning){scanning=true;loop();}
+}
+function whoNote(msg){const box=$("whoList");box.innerHTML="";box.appendChild(el("div","sub",msg));}
+async function loadWho(){
+  try{
+    const res=await fetch(FN+"/door-checkins?event="+encodeURIComponent(eventId),{headers:doorHdrs()});
+    if(res.status===401)return whoNote("Door code rejected.");
+    whoData=await res.json();
+    $("whoUpd").textContent="Updated "+fmt(new Date().toISOString());
+    renderWho();
+  }catch(e){
+    // Keep showing the last list: a stale list beats a blank one at the door.
+    $("whoUpd").textContent="Offline, last update shown";
+    if(!whoData)whoNote("Can't load: "+e.message);
+  }
+}
+function setWhoMode(m){
+  whoMode=m;
+  $("segAll").classList.toggle("on",m==="all");$("segVip").classList.toggle("on",m==="vip");
+  renderWho();
+}
+function renderWho(){
+  if(!whoData)return;
+  const q=$("wq").value.trim().toLowerCase();
+  const hit=function(n){return !q||(n||"").toLowerCase().indexOf(q)>=0;};
+  const v=whoData.vip;
+  $("whoCount").textContent=whoData.checked_in+" in";
+  $("segVip").textContent=v?"VIP "+v.checked_in+"/"+v.capacity:"VIP";
+  const box=$("whoList");box.innerHTML="";
+  if(whoMode==="all"){
+    const rows=whoData.checkins.filter(function(r){return hit(r.name);});
+    if(!rows.length)return whoNote(q?"No one inside matches that name.":"Nobody checked in yet.");
+    rows.forEach(function(r){
+      const row=el("div","row"),info=el("div");
+      info.appendChild(el("div","rn",r.name||"(no name)"));
+      info.appendChild(el("div","sub",(r.ticket_type||"Ticket")+(r.is_guest&&r.holder_name?" · guest of "+r.holder_name:"")));
+      row.appendChild(info);row.appendChild(el("div","num",fmt(r.checked_in_at)));
+      box.appendChild(row);
+    });
+    return;
+  }
+  if(!v)return whoNote("No VIP sections tonight.");
+  let shown=0;
+  v.tiers.forEach(function(t){
+    const secs=t.sections.filter(function(s){
+      return hit(s.holder_name)||s.people_in.some(function(p){return hit(p.name);});
+    });
+    if(!secs.length)return;
+    const th=el("div","tier");th.appendChild(el("span","",t.ticket_type));
+    th.appendChild(el("span","num",t.checked_in+"/"+t.capacity));box.appendChild(th);
+    secs.forEach(function(s,i){
+      shown++;
+      const key=t.ticket_type+"|"+i+"|"+s.holder_name;
+      const wrap=el("div","sec"+((whoOpen[key]||q)?" open":""));
+      const head=el("button","sech");head.type="button";
+      head.appendChild(el("span","",s.holder_name));
+      head.appendChild(el("span","num"+(s.checked_in>=s.section_size?" full":""),s.checked_in+"/"+s.section_size));
+      head.onclick=function(){whoOpen[key]=!whoOpen[key];wrap.classList.toggle("open");};
+      const body=el("div","secb");
+      if(!s.people_in.length)body.appendChild(el("div","sub","Nobody from this section is in yet."));
+      s.people_in.forEach(function(p){
+        const r=el("div","row"),n=el("div","rn",p.name);
+        if(p.is_holder)n.appendChild(el("span","tag","HOLDER"));
+        r.appendChild(n);r.appendChild(el("div","num",fmt(p.checked_in_at)));body.appendChild(r);
+      });
+      wrap.appendChild(head);wrap.appendChild(body);box.appendChild(wrap);
+    });
+  });
+  if(!shown)whoNote("No VIP section matches that name.");
 }
 boot();
 </script></body></html>
