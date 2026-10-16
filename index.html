@@ -10156,6 +10156,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
   .secb{display:none;padding:0 14px 10px}
   .sec.open .secb{display:block}
   .tag{font:700 10px ui-monospace,monospace;color:#FF6A00;margin-left:8px}
+  .isin{color:#22c55e}
 </style></head><body>
 <div class="head"><b>STAY LIT · DOOR</b><button class="c" id="evt" onclick="backToGate()">SCANNER</button></div>
 <div class="wrap">
@@ -10181,7 +10182,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       <button class="ghost" id="whoBtn" onclick="openWho()">Who's in</button>
       <div id="whoPanel">
         <div class="whohead"><b id="whoCount">0 in</b><span class="sub" id="whoUpd"></span></div>
-        <div class="seg"><button class="evt on" id="segAll" type="button" onclick="setWhoMode('all')">Everyone</button><button class="evt" id="segVip" type="button" onclick="setWhoMode('vip')">VIP</button></div>
+        <div class="seg"><button class="evt on" id="segAll" type="button" onclick="setWhoMode('all')">Everyone</button><button class="evt" id="segList" type="button" onclick="setWhoMode('list')">Guest list</button><button class="evt" id="segVip" type="button" onclick="setWhoMode('vip')">VIP</button></div>
         <input id="wq" type="search" placeholder="Search name" autocomplete="off" oninput="renderWho()">
         <div id="whoList"></div>
         <button class="ghost" onclick="closeWho()">Back to camera</button>
@@ -10352,7 +10353,7 @@ function next(){
   clearTimeout(verdictTimer);
   $("verdict").className="verdict";
   // Admitting a group by name: stay on the result list instead of the camera.
-  if(verdictFrom==="lookup")return;
+  if(verdictFrom==="lookup"||verdictFrom==="list")return;
   scanning=true;loop();
 }
 
@@ -10443,6 +10444,7 @@ async function loadWho(){
 function setWhoMode(m){
   whoMode=m;
   $("segAll").classList.toggle("on",m==="all");$("segVip").classList.toggle("on",m==="vip");
+  $("segList").classList.toggle("on",m==="list");
   renderWho();
 }
 function renderWho(){
@@ -10461,6 +10463,34 @@ function renderWho(){
       info.appendChild(el("div","rn",r.name||"(no name)"));
       info.appendChild(el("div","sub",(r.ticket_type||"Ticket")+(r.is_guest&&r.holder_name?" · guest of "+r.holder_name:"")));
       row.appendChild(info);row.appendChild(el("div","num",fmt(r.checked_in_at)));
+      box.appendChild(row);
+    });
+    return;
+  }
+  if(whoMode==="list"){
+    // A Pages copy newer than the deployed door-checkins gets no guests field.
+    if(!whoData.guests)return whoNote("Guest list needs the latest door backend.");
+    const rows=whoData.guests.filter(function(g){return hit(g.name);});
+    if(!rows.length)return whoNote(q?"No ticket matches that name.":"No tickets for tonight.");
+    // Never let the door believe a short list is the whole list.
+    if(whoData.guests_total>whoData.guests.length){
+      box.appendChild(el("div","trunc","Showing "+whoData.guests.length+" of "+whoData.guests_total+". Search to find the rest."));
+    }
+    rows.forEach(function(g){
+      const row=el("div","row"),info=el("div");
+      info.appendChild(el("div","rn",g.name));
+      info.appendChild(el("div","sub",g.ticket_type||"Ticket"));
+      row.appendChild(info);
+      if(g.checked_in_at){row.appendChild(el("div","num isin","IN "+fmt(g.checked_in_at)));}
+      else{
+        const b=el("button","mini","Check in");
+        b.onclick=function(){
+          b.disabled=true;
+          // Same endpoint a scan uses, so a tap records identically to a scan.
+          checkIn(g.ticket_token,"list").then(loadWho);
+        };
+        row.appendChild(b);
+      }
       box.appendChild(row);
     });
     return;
