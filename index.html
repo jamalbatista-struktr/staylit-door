@@ -10173,9 +10173,9 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
     <div class="pad">
       <button class="ghost" id="cant" onclick="openLookup()">Can't scan? Find by name</button>
       <div id="lookup">
-        <input id="q" type="search" placeholder="Guest name or email" autocomplete="off"
-               onkeydown="if(event.key==='Enter')search()">
-        <button onclick="search()">Search</button>
+        <div class="whohead"><b id="lkCount"></b><span class="sub" id="lkUpd"></span></div>
+        <input id="q" type="search" placeholder="Type a name to filter the list" autocomplete="off"
+               oninput="renderLookup()" onkeydown="if(event.key==='Enter')lookupEnter()">
         <button class="ghost" onclick="closeLookup()">Back to camera</button>
         <div id="results"></div>
       </div>
@@ -10358,13 +10358,77 @@ function next(){
 }
 
 // ---- manual lookup ----------------------------------------------------------
-function openLookup(){scanning=false;$("lookup").style.display="block";$("cant").style.display="none";$("whoBtn").style.display="none";$("q").focus();}
+// Opens on the FULL list for tonight, A to Z, so staff scroll it or type to
+// filter it. Nothing waits on a Search tap (Nov 6: the door asked for this).
+// The server search stays as the fallback (Enter) when the list cannot load.
+const LK_REFRESH_MS=30000;
+let lkList=null,lkTotal=0,lkTimer=null;
+function openLookup(){
+  scanning=false;
+  // Hide the camera so the list sits at the top of a phone screen, not below it.
+  $("stage").style.display="none";
+  $("lookup").style.display="block";$("cant").style.display="none";$("whoBtn").style.display="none";
+  $("q").focus();
+  loadLookup();clearInterval(lkTimer);lkTimer=setInterval(loadLookup,LK_REFRESH_MS);
+}
 function closeLookup(){
+  clearInterval(lkTimer);lkTimer=null;
   $("lookup").style.display="none";$("cant").style.display="block";$("whoBtn").style.display="block";
+  $("stage").style.display="";
   $("q").value="";$("results").innerHTML="";
   if(stream&&!scanning){scanning=true;loop();}
 }
-function note(msg){const box=$("results");box.innerHTML="";const d=document.createElement("div");d.className="sub";d.textContent=msg;box.appendChild(d);}
+function note(msg){const box=$("results");box.innerHTML="";box.appendChild(el("div","sub",msg));}
+function byName(a,b){return (a.name||"").localeCompare(b.name||"","en",{sensitivity:"base"});}
+async function loadLookup(){
+  if(!lkList)note("Loading tonight's list…");
+  try{
+    const res=await fetch(FN+"/door-checkins?event="+encodeURIComponent(eventId),{headers:doorHdrs()});
+    if(res.status===401)return note("Door code rejected.");
+    const d=await res.json();
+    if(!d.guests)throw new Error("no list");
+    // A to Z in the browser: the database may sort "Zed" before "amy".
+    lkList=d.guests.slice().sort(byName);
+    lkTotal=d.guests_total||lkList.length;
+    $("lkUpd").textContent="Updated "+fmt(new Date().toISOString());
+    renderLookup();
+  }catch(e){
+    // Keep showing the last list: a stale list beats a blank one at the door.
+    $("lkUpd").textContent=lkList?"Offline, last list shown":"";
+    if(!lkList)note("List unavailable. Type a name and press Enter to search.");
+  }
+}
+function renderLookup(){
+  if(!lkList)return;
+  const q=$("q").value.trim().toLowerCase();
+  const rows=lkList.filter(function(g){return !q||(g.name||"").toLowerCase().indexOf(q)>=0;});
+  $("lkCount").textContent=rows.length+(q?" match":" on the list");
+  const box=$("results");box.innerHTML="";
+  if(!rows.length)return note(q?"No ticket matches that name.":"No tickets for tonight.");
+  // Never let the door believe a short list is the whole list.
+  if(lkTotal>lkList.length)box.appendChild(el("div","trunc","Showing "+lkList.length+" of "+lkTotal+". Press Enter to search the rest."));
+  rows.forEach(function(g){box.appendChild(lookupRow(g));});
+}
+function lookupRow(r){
+  // Built with DOM nodes, never innerHTML: guest names are untrusted text.
+  const row=el("div","row"),info=el("div");
+  info.appendChild(el("div","rn",r.name||"(no name)"));
+  info.appendChild(el("div","sub",(r.ticket_type||"Ticket")+" · "+(r.checked_in_at?"in at "+fmt(r.checked_in_at):"not checked in")));
+  row.appendChild(info);
+  if(r.checked_in_at){row.appendChild(el("div","num isin","IN"));}
+  else{
+    const b=el("button","mini","Check in");
+    b.onclick=function(){
+      b.disabled=true;
+      // Same endpoint a scan uses, so a manual admission records identically.
+      checkIn(r.ticket_token,"lookup").then(loadLookup);
+    };
+    row.appendChild(b);
+  }
+  return row;
+}
+// Enter only matters when the full list is missing or truncated.
+function lookupEnter(){if(!lkList||lkTotal>lkList.length)search();}
 async function search(){
   const q=$("q").value.trim();
   if(q.length<2)return note("Type at least 2 characters.");
@@ -10374,35 +10438,11 @@ async function search(){
       +"&q="+encodeURIComponent(q));
     if(res.status===401)return note("Door code rejected.");
     const d=await res.json();
-    const rows=d.results||[];
-    if(!rows.length)return note("No one found for \u201C"+q+"\u201D.");
+    const rows=(d.results||[]).slice().sort(byName);
+    if(!rows.length)return note("No one found for that name.");
     const box=$("results");box.innerHTML="";
-    // Never let the door believe a short list is the whole list.
-    if(d.total&&d.total>rows.length){
-      const w=document.createElement("div");w.className="trunc";
-      w.textContent="Showing "+rows.length+" of "+d.total+" — type more letters to narrow.";
-      box.appendChild(w);
-    }
-    // Built with DOM nodes, never innerHTML: guest names are untrusted text.
-    rows.forEach(function(r){
-      const row=document.createElement("div");row.className="row";
-      const info=document.createElement("div");
-      const nm=document.createElement("div");nm.className="rn";nm.textContent=r.name||"(no name)";
-      const st=document.createElement("div");st.className="sub";
-      st.textContent=(r.ticket_type||"Ticket")+" · "
-        +(r.checked_in_at?"in at "+fmt(r.checked_in_at):"not checked in");
-      info.appendChild(nm);info.appendChild(st);row.appendChild(info);
-      if(!r.checked_in_at){
-        const b=document.createElement("button");b.className="mini";b.textContent="Check in";
-        b.onclick=function(){
-          b.disabled=true;
-          // Same endpoint a scan uses, so a manual admission records identically.
-          checkIn(r.ticket_token,"lookup").then(search);
-        };
-        row.appendChild(b);
-      }
-      box.appendChild(row);
-    });
+    if(d.total&&d.total>rows.length)box.appendChild(el("div","trunc","Showing "+rows.length+" of "+d.total+". Type more letters to narrow."));
+    rows.forEach(function(r){box.appendChild(lookupRow(r));});
   }catch(e){note("Search failed: "+e.message);}
 }
 
