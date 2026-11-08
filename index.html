@@ -10274,6 +10274,7 @@ function start(silent){
       // path leave the prefilled gate up rather than showing a scary error.
       if(silent){$("go").textContent="Resume scanning";return;}
       $("err").textContent="Camera blocked: "+e.message;
+      if($("cam").style.display==="block")$("camInfo").textContent="Camera blocked: "+e.message+" (tap the event name up top to restart)";
     });
 }
 // Android (Nov 6): scans failed on Android and worked on iPhone. Chrome there hands
@@ -10331,7 +10332,7 @@ function loop(){
     // Only the middle square (what the reticle frames), downscaled: the whole
     // 1080p frame cost a slow phone most of each frame and bought nothing.
     const s=Math.round(0.8*Math.min(v.videoWidth,v.videoHeight)),o=Math.min(s,DECODE_PX);
-    if(cv.width!==o){cv.width=o;cv.height=o;}
+    if(cv.width!==o||cv.height!==o){cv.width=o;cv.height=o;}
     ctx.drawImage(v,(v.videoWidth-s)/2,(v.videoHeight-s)/2,s,s,0,0,o,o);
     const img=ctx.getImageData(0,0,o,o);
     const r=jsQR(img.data,o,o);
@@ -10500,14 +10501,14 @@ function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className
 function openWho(){
   scanning=false;
   // Hide the camera so the list sits at the top of a phone screen, not below it.
-  $("stage").style.display="none";
+  $("stage").style.display=$("camrow").style.display="none";
   $("cant").style.display="none";$("whoBtn").style.display="none";$("whoPanel").style.display="block";
   loadWho();clearInterval(whoTimer);whoTimer=setInterval(loadWho,WHO_REFRESH_MS);
 }
 function closeWho(){
   clearInterval(whoTimer);whoTimer=null;
   $("whoPanel").style.display="none";$("cant").style.display="block";$("whoBtn").style.display="block";
-  $("stage").style.display="";$("wq").value="";
+  $("stage").style.display=$("camrow").style.display="";$("wq").value="";
   if(stream&&!scanning){scanning=true;loop();}
 }
 function whoNote(msg){const box=$("whoList");box.innerHTML="";box.appendChild(el("div","sub",msg));}
