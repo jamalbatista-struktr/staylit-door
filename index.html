@@ -10131,6 +10131,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
   .row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid #1c1c1c}
   .rn{font-weight:700;font-size:15px}
   .mini{width:auto;margin:0;padding:9px 14px;font-size:13px;flex:none}
+  .camrow{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px;min-height:20px}
   .mini[disabled]{opacity:.45}
   .trunc{color:#FFC400;font:600 12px ui-monospace,monospace;padding:8px 0;border-bottom:1px solid #1c1c1c}
   .verdict{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;z-index:9}
@@ -10170,6 +10171,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
   <div id="cam">
     <div class="counter">Checked in: <b id="cnt">0</b></div>
     <div class="stage" id="stage"><video id="v" playsinline muted></video><div class="reticle"><div></div></div></div>
+    <div class="camrow" id="camrow"><span class="sub" id="camInfo"></span><button class="mini ghost" id="camSwap" type="button" style="display:none" onclick="swapCamera()">Switch camera</button></div>
     <div class="pad">
       <button class="ghost" id="cant" onclick="openLookup()">Can't scan? Find by name</button>
       <div id="lookup">
@@ -10194,7 +10196,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 <script>
 const ANON="sb_publishable_1LItrh36ssH6c6_gKlqCUQ_4BG6FVwp";
 const FN="https://vftfzidbhivhyzyphmjf.supabase.co/functions/v1";
-const LS={code:"slDoorCode",evt:"slEventId",evtName:"slEventName"};
+const LS={code:"slDoorCode",evt:"slEventId",evtName:"slEventName",cam:"slCamId"};
 const VERDICT_MS=1800;   // line speed: staff should not have to tap per guest
 const RESCAN_MS=5000;    // ignore the same QR this long after a verdict
 const RETRY_MS=1000;     // one silent retry before crying ERROR at the door
@@ -10254,10 +10256,11 @@ function start(silent){
   code=$("code").value.trim();
   if(!code){if(!silent)$("err").textContent="Enter the door code.";return;}
   if(!eventId){if(!silent)$("err").textContent="Pick tonight's event.";return;}
-  navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}})
+  navigator.mediaDevices.getUserMedia({video:camWant()})
     .then(function(s){
       localStorage.setItem(LS.code,code);
       stream=s;const v=$("v");v.srcObject=s;v.play();
+      tuneCamera(s);
       $("err").textContent="";
       $("gate").style.display="none";$("cam").style.display="block";
       $("evt").textContent=eventName||"SCANNER";
@@ -10265,11 +10268,47 @@ function start(silent){
       scanning=true;loop();
     })
     .catch(function(e){
+      // A remembered lens can vanish (OS update, permission reset): forget it, retry once.
+      if(camId){camId="";localStorage.removeItem(LS.cam);start(silent);return;}
       // Browsers can refuse a camera opened without a tap. On the silent resume
       // path leave the prefilled gate up rather than showing a scary error.
       if(silent){$("go").textContent="Resume scanning";return;}
       $("err").textContent="Camera blocked: "+e.message;
     });
+}
+// Android (Nov 6): scans failed on Android and worked on iPhone. Chrome there hands
+// over a 640x480 feed unless asked, and the default back lens on some phones
+// cannot focus up close. Ask for 720p and continuous focus, show which lens and
+// size we got, and let staff switch lenses. iPhone ignores what it does not need.
+let camId=localStorage.getItem(LS.cam)||"",cams=[];
+function camWant(){
+  const w={width:{ideal:1280},height:{ideal:720}};
+  if(camId)w.deviceId={exact:camId};else w.facingMode="environment";
+  return w;
+}
+function tuneCamera(s){
+  const track=s.getVideoTracks()[0];if(!track)return;
+  try{
+    const caps=track.getCapabilities?track.getCapabilities():{};
+    if(caps.focusMode&&caps.focusMode.indexOf("continuous")>=0)
+      track.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(function(){});
+  }catch(_){}
+  const v=$("v");
+  function info(){if(v.videoWidth)$("camInfo").textContent=(track.label||"Camera")+" · "+v.videoWidth+"×"+v.videoHeight;}
+  v.addEventListener("loadedmetadata",info);setTimeout(info,800);
+  navigator.mediaDevices.enumerateDevices().then(function(list){
+    cams=list.filter(function(d){return d.kind==="videoinput"&&!/front|user/i.test(d.label);});
+    if(cams.length<2)cams=list.filter(function(d){return d.kind==="videoinput";});
+    $("camSwap").style.display=cams.length>1?"":"none";
+  }).catch(function(){});
+}
+function swapCamera(){
+  if(cams.length<2)return;
+  const cur=stream&&stream.getVideoTracks()[0].getSettings().deviceId;
+  const i=cams.findIndex(function(d){return d.deviceId===cur;});
+  camId=cams[(i+1)%cams.length].deviceId;localStorage.setItem(LS.cam,camId);
+  scanning=false;if(stream)stream.getTracks().forEach(function(t){t.stop();});stream=null;
+  start(false);
 }
 // Wrong event picked? The header name is the way back.
 function backToGate(){
@@ -10284,14 +10323,18 @@ function backToGate(){
 
 // ---- camera -----------------------------------------------------------------
 const cv=document.createElement("canvas"),ctx=cv.getContext("2d",{willReadFrequently:true});
+const DECODE_PX=720;      // decode square cap: keeps a slow Android under ~50 ms a frame
 function loop(){
   if(!scanning)return;
   const v=$("v");
-  if(v.readyState===v.HAVE_ENOUGH_DATA){
-    cv.width=v.videoWidth;cv.height=v.videoHeight;
-    ctx.drawImage(v,0,0,cv.width,cv.height);
-    const img=ctx.getImageData(0,0,cv.width,cv.height);
-    const r=jsQR(img.data,img.width,img.height);
+  if(v.readyState===v.HAVE_ENOUGH_DATA&&v.videoWidth){
+    // Only the middle square (what the reticle frames), downscaled: the whole
+    // 1080p frame cost a slow phone most of each frame and bought nothing.
+    const s=Math.round(0.8*Math.min(v.videoWidth,v.videoHeight)),o=Math.min(s,DECODE_PX);
+    if(cv.width!==o){cv.width=o;cv.height=o;}
+    ctx.drawImage(v,(v.videoWidth-s)/2,(v.videoHeight-s)/2,s,s,0,0,o,o);
+    const img=ctx.getImageData(0,0,o,o);
+    const r=jsQR(img.data,o,o);
     if(r&&r.data){
       const t=tokenFrom(r.data);
       // The verdict auto-dismisses while the guest is often still holding their
@@ -10366,7 +10409,7 @@ let lkList=null,lkTotal=0,lkTimer=null;
 function openLookup(){
   scanning=false;
   // Hide the camera so the list sits at the top of a phone screen, not below it.
-  $("stage").style.display="none";
+  $("stage").style.display=$("camrow").style.display="none";
   $("lookup").style.display="block";$("cant").style.display="none";$("whoBtn").style.display="none";
   $("q").focus();
   loadLookup();clearInterval(lkTimer);lkTimer=setInterval(loadLookup,LK_REFRESH_MS);
@@ -10374,7 +10417,7 @@ function openLookup(){
 function closeLookup(){
   clearInterval(lkTimer);lkTimer=null;
   $("lookup").style.display="none";$("cant").style.display="block";$("whoBtn").style.display="block";
-  $("stage").style.display="";
+  $("stage").style.display=$("camrow").style.display="";
   $("q").value="";$("results").innerHTML="";
   if(stream&&!scanning){scanning=true;loop();}
 }
