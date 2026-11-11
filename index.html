@@ -10162,10 +10162,11 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 <div class="head"><b>STAY LIT · DOOR</b><button class="c" id="evt" onclick="backToGate()">SCANNER</button></div>
 <div class="wrap">
   <div class="gate" id="gate">
-    <h1>Door Scanner</h1><p>Enter the door code and pick tonight's event.</p>
+    <h1>Door Scanner</h1><p id="gateText">Enter the door code and pick tonight's event.</p>
     <input id="code" type="password" inputmode="numeric" placeholder="Door code" autocomplete="off">
     <div class="events" id="events"><div class="sub">Loading events…</div></div>
     <button id="go" onclick="start(false)">Start scanning</button>
+    <button class="ghost" id="forget" type="button" style="display:none;margin-top:12px" onclick="forgetLink()">Forget this link</button>
     <div class="err" id="err"></div>
   </div>
   <div id="cam">
@@ -10196,24 +10197,54 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 <script>
 const ANON="sb_publishable_1LItrh36ssH6c6_gKlqCUQ_4BG6FVwp";
 const FN="https://vftfzidbhivhyzyphmjf.supabase.co/functions/v1";
-const LS={code:"slDoorCode",evt:"slEventId",evtName:"slEventName",cam:"slCamId"};
+const LS={code:"slDoorCode",evt:"slEventId",evtName:"slEventName",cam:"slCamId",link:"slDoorLink"};
 const VERDICT_MS=1800;   // line speed: staff should not have to tap per guest
 const RESCAN_MS=5000;    // ignore the same QR this long after a verdict
 const RETRY_MS=1000;     // one silent retry before crying ERROR at the door
-let code="",eventId="",eventName="",stream=null,scanning=false,count=0;
+let code="",link="",eventId="",eventName="",stream=null,scanning=false,count=0;
 let lastToken="",lastTokenAt=0,verdictTimer=null,verdictFrom="scan";
 const $=id=>document.getElementById(id);
 const authHdrs=()=>({"apikey":ANON,"Authorization":"Bearer "+ANON});
-const doorHdrs=()=>Object.assign({"x-door-secret":code},authHdrs());
+// A personal door link replaces the shared code when this phone has one.
+const doorHdrs=()=>Object.assign(link?{"x-door-link":link}:{"x-door-secret":code},authHdrs());
 const countKey=()=>"slCount:"+eventId;
 
 // ---- gate -------------------------------------------------------------------
+function showLinkGate(){
+  $("code").style.display=link?"none":"";
+  $("forget").style.display=link?"":"none";
+  $("gateText").textContent=link?"Your door link is saved on this phone. Pick tonight's event.":"Enter the door code and pick tonight's event.";
+}
+function forgetLink(){
+  localStorage.removeItem(LS.link);link="";showLinkGate();
+}
+// Why a door link was refused, in words for staff; null when it was not a link problem.
+async function linkRefusal(res){
+  if(!link)return null;
+  if(res.status===401)return {title:"LINK NOT VALID",sub:"Ask for a new door link"};
+  if(res.status===403){
+    let why="";
+    try{why=((await res.clone().json())||{}).error;}catch(_){}
+    if(why==="not_your_night")return {title:"NOT YOUR NIGHT",sub:"This link does not cover this event"};
+    if(why==="outside_window")return {title:"TOO EARLY",sub:"This link works from 6 hours before doors"};
+  }
+  return null;
+}
 async function boot(){
+  // The link arrives once as ?k=, is kept on this phone, then leaves the address bar.
+  const k=new URLSearchParams(location.search).get("k");
+  if(k){
+    localStorage.setItem(LS.link,k.trim());
+    const u=new URL(location.href);u.searchParams.delete("k");
+    history.replaceState(null,"",u.pathname+u.search+u.hash);
+  }
+  link=localStorage.getItem(LS.link)||"";
+  showLinkGate();
   const c=localStorage.getItem(LS.code);
   if(c)$("code").value=c;
   await loadEvents();
   // A mid-rush refresh must not dump staff back to the gate.
-  if(c&&eventId)start(true);
+  if((c||link)&&eventId)start(true);
 }
 async function loadEvents(){
   try{
@@ -10254,11 +10285,11 @@ function pickEvent(id,name){
 }
 function start(silent){
   code=$("code").value.trim();
-  if(!code){if(!silent)$("err").textContent="Enter the door code.";return;}
+  if(!code&&!link){if(!silent)$("err").textContent="Enter the door code.";return;}
   if(!eventId){if(!silent)$("err").textContent="Pick tonight's event.";return;}
   navigator.mediaDevices.getUserMedia({video:camWant()})
     .then(function(s){
-      localStorage.setItem(LS.code,code);
+      if(!link)localStorage.setItem(LS.code,code);
       stream=s;const v=$("v");v.srcObject=s;v.play();
       tuneCamera(s);
       $("err").textContent="";
@@ -10363,6 +10394,8 @@ async function checkIn(token,from){
   try{
     const res=await post(FN+"/check-in?ticket="+encodeURIComponent(token)
       +"&event="+encodeURIComponent(eventId));
+    const refused=await linkRefusal(res);
+    if(refused){return show(false,refused.title,"",refused.sub,from,res.status===403);}
     if(res.status===401){return show(false,"WRONG CODE","","Door code rejected",from);}
     render(await res.json(),from);
   }catch(e){show(false,"ERROR","",e.message,from);}
@@ -10428,6 +10461,8 @@ async function loadLookup(){
   if(!lkList)note("Loading tonight's list…");
   try{
     const res=await fetch(FN+"/door-checkins?event="+encodeURIComponent(eventId),{headers:doorHdrs()});
+    const refused=await linkRefusal(res);
+    if(refused){$("err").textContent=refused.sub;return note(refused.sub);}
     if(res.status===401)return note("Door code rejected.");
     const d=await res.json();
     if(!d.guests)throw new Error("no list");
@@ -10480,6 +10515,8 @@ async function search(){
   try{
     const res=await post(FN+"/door-lookup?event="+encodeURIComponent(eventId)
       +"&q="+encodeURIComponent(q));
+    const refused=await linkRefusal(res);
+    if(refused){$("err").textContent=refused.sub;return note(refused.sub);}
     if(res.status===401)return note("Door code rejected.");
     const d=await res.json();
     const rows=(d.results||[]).slice().sort(byName);
@@ -10515,6 +10552,8 @@ function whoNote(msg){const box=$("whoList");box.innerHTML="";box.appendChild(el
 async function loadWho(){
   try{
     const res=await fetch(FN+"/door-checkins?event="+encodeURIComponent(eventId),{headers:doorHdrs()});
+    const refused=await linkRefusal(res);
+    if(refused){$("err").textContent=refused.sub;return whoNote(refused.sub);}
     if(res.status===401)return whoNote("Door code rejected.");
     whoData=await res.json();
     $("whoUpd").textContent="Updated "+fmt(new Date().toISOString());
