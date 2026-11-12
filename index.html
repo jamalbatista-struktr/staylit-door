@@ -10164,6 +10164,11 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
   <div class="gate" id="gate">
     <h1>Door Scanner</h1><p id="gateText">Enter the door code and pick tonight's event.</p>
     <input id="code" type="password" inputmode="numeric" placeholder="Door code" autocomplete="off">
+    <div id="confirm" style="display:none">
+      <input id="phoneCode" inputmode="numeric" maxlength="6" placeholder="Six digit code" autocomplete="one-time-code" style="display:none">
+      <button id="confirmGo" type="button" style="display:none" onclick="confirmPhone()">Confirm</button>
+      <button id="sendCode" type="button" onclick="sendPhoneCode()">Send my code</button>
+    </div>
     <div class="events" id="events"><div class="sub">Loading events…</div></div>
     <button id="go" onclick="start(false)">Start scanning</button>
     <button class="ghost" id="forget" type="button" style="display:none;margin-top:12px" onclick="forgetLink()">Forget this link</button>
@@ -10197,31 +10202,91 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 <script>
 const ANON="sb_publishable_1LItrh36ssH6c6_gKlqCUQ_4BG6FVwp";
 const FN="https://vftfzidbhivhyzyphmjf.supabase.co/functions/v1";
-const LS={code:"slDoorCode",evt:"slEventId",evtName:"slEventName",cam:"slCamId",link:"slDoorLink"};
+const LS={code:"slDoorCode",evt:"slEventId",evtName:"slEventName",cam:"slCamId",link:"slDoorLink",device:"slDoorDevice"};
 const VERDICT_MS=1800;   // line speed: staff should not have to tap per guest
 const RESCAN_MS=5000;    // ignore the same QR this long after a verdict
 const RETRY_MS=1000;     // one silent retry before crying ERROR at the door
+let device="",needCode=false,codeSent=false;
 let code="",link="",eventId="",eventName="",stream=null,scanning=false,count=0;
 let lastToken="",lastTokenAt=0,verdictTimer=null,verdictFrom="scan";
 const $=id=>document.getElementById(id);
 const authHdrs=()=>({"apikey":ANON,"Authorization":"Bearer "+ANON});
 // A personal door link replaces the shared code when this phone has one.
-const doorHdrs=()=>Object.assign(link?{"x-door-link":link}:{"x-door-secret":code},authHdrs());
+// A Door member's phone also sends the token it got for its emailed code.
+const doorHdrs=()=>Object.assign(link?(device?{"x-door-link":link,"x-door-device":device}:{"x-door-link":link}):{"x-door-secret":code},authHdrs());
 const countKey=()=>"slCount:"+eventId;
 
 // ---- gate -------------------------------------------------------------------
 function showLinkGate(){
+  // A Door member confirms the phone once with an emailed code before anything else shows.
+  const confirming=!!link&&needCode;
   $("code").style.display=link?"none":"";
   $("forget").style.display=link?"":"none";
-  $("gateText").textContent=link?"Your door link is saved on this phone. Pick tonight's event.":"Enter the door code and pick tonight's event.";
+  $("confirm").style.display=confirming?"":"none";
+  $("events").style.display=confirming?"none":"";
+  $("go").style.display=confirming?"none":"";
+  $("phoneCode").style.display=codeSent?"":"none";
+  $("confirmGo").style.display=codeSent?"":"none";
+  $("sendCode").textContent=codeSent?"Send it again":"Send my code";
+  $("sendCode").className=codeSent?"ghost":"";
+  $("gateText").textContent=confirming
+    ?(codeSent?"Check your email. Your code works for 10 minutes.":"Confirm this phone. We email a six digit code to the address your link was sent to. You do this once per phone.")
+    :link?"Your door link is saved on this phone. Pick tonight's event.":"Enter the door code and pick tonight's event.";
 }
 function forgetLink(){
-  localStorage.removeItem(LS.link);link="";showLinkGate();
+  localStorage.removeItem(LS.link);localStorage.removeItem(LS.device);
+  link="";device="";needCode=false;codeSent=false;showLinkGate();
+}
+function doorCode(body){
+  return fetch(FN+"/door-code",{method:"POST",headers:Object.assign({"content-type":"application/json"},doorHdrs()),body:JSON.stringify(body)});
+}
+// Asks whether this phone still needs its code. Offline it stays quiet: the first scan will say.
+async function checkPhone(){
+  if(!link)return;
+  try{
+    const res=await doorCode({action:"status"});
+    if(res.status===200)needCode=((await res.json())||{}).status==="needs_code";
+    else if(res.status===401)$("err").textContent="This link is not valid. Ask for a new door link.";
+  }catch(_){}
+  showLinkGate();
+}
+async function sendPhoneCode(){
+  $("err").textContent="";$("sendCode").disabled=true;
+  try{
+    const res=await doorCode({action:"start"});
+    if(res.status===200)codeSent=true;
+    else if(res.status===429)$("err").textContent="Too many tries. Ask for a new code in a few minutes.";
+    else if(res.status===401)$("err").textContent="This link is not valid. Ask for a new door link.";
+    else $("err").textContent="That did not work. Try again.";
+  }catch(_){$("err").textContent="That did not work. Try again.";}
+  $("sendCode").disabled=false;showLinkGate();
+}
+async function confirmPhone(){
+  const typed=$("phoneCode").value.trim();
+  if(!/^[0-9]{6}$/.test(typed)){$("err").textContent="Type the six digit code.";return;}
+  $("err").textContent="";$("confirmGo").disabled=true;
+  try{
+    const res=await doorCode({action:"verify",code:typed});
+    const d=res.status===200?((await res.json())||{}):{};
+    if(d.device){
+      device=d.device;localStorage.setItem(LS.device,device);
+      needCode=false;codeSent=false;$("phoneCode").value="";
+    }
+    else if(res.status===429)$("err").textContent="Too many tries. Ask for a new code in a few minutes.";
+    else if(res.status===401)$("err").textContent="That code did not work. Check it and try again.";
+    else $("err").textContent="That did not work. Try again.";
+  }catch(_){$("err").textContent="That did not work. Try again.";}
+  $("confirmGo").disabled=false;showLinkGate();
 }
 // Why a door link was refused, in words for staff; null when it was not a link problem.
 async function linkRefusal(res){
   if(!link)return null;
-  if(res.status===401)return {title:"LINK NOT VALID",sub:"Ask for a new door link"};
+  if(res.status===401){
+    let why401="";
+    try{why401=((await res.clone().json())||{}).error;}catch(_){}
+    if(why401==="needs_code"){needCode=true;return {title:"CONFIRM THIS PHONE",sub:"Tap the event name up top"};}
+    return {title:"LINK NOT VALID",sub:"Ask for a new door link"};
+  }
   if(res.status===403){
     let why="";
     try{why=((await res.clone().json())||{}).error;}catch(_){}
@@ -10234,17 +10299,20 @@ async function boot(){
   // The link arrives once as ?k=, is kept on this phone, then leaves the address bar.
   const k=new URLSearchParams(location.search).get("k");
   if(k){
+    // A new link means a new person or a fresh invite: the old phone token does not carry over.
+    if(localStorage.getItem(LS.link)!==k.trim())localStorage.removeItem(LS.device);
     localStorage.setItem(LS.link,k.trim());
     const u=new URL(location.href);u.searchParams.delete("k");
     history.replaceState(null,"",u.pathname+u.search+u.hash);
   }
   link=localStorage.getItem(LS.link)||"";
+  device=localStorage.getItem(LS.device)||"";
   showLinkGate();
   const c=localStorage.getItem(LS.code);
   if(c)$("code").value=c;
-  await loadEvents();
+  await Promise.all([loadEvents(),checkPhone()]);
   // A mid-rush refresh must not dump staff back to the gate.
-  if((c||link)&&eventId)start(true);
+  if((c||link)&&eventId&&!needCode)start(true);
 }
 async function loadEvents(){
   try{
@@ -10286,6 +10354,7 @@ function pickEvent(id,name){
 function start(silent){
   code=$("code").value.trim();
   if(!code&&!link){if(!silent)$("err").textContent="Enter the door code.";return;}
+  if(link&&needCode){showLinkGate();return;}
   if(!eventId){if(!silent)$("err").textContent="Pick tonight's event.";return;}
   navigator.mediaDevices.getUserMedia({video:camWant()})
     .then(function(s){
@@ -10350,6 +10419,7 @@ function backToGate(){
     stream=null;closeLookup();closeWho();
     $("cam").style.display="none";$("gate").style.display="block";
     $("evt").textContent="SCANNER";$("go").textContent="Start scanning";
+    showLinkGate();
   }
 }
 
